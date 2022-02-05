@@ -7,7 +7,7 @@ Help()
    # Display Help
    echo "This function extracts the depth of coverage across the genome after filtering out sequencing reads without at least one mismatch at any G:C position"
    echo
-   echo "Syntax: GCmmFilter [h|i|o]" 
+   echo "Syntax: GGmmDepth.sh [h|i|o]" 
    echo "options:"
    echo "h     Print this Help."
    echo "i     input.bam"
