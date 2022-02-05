@@ -1,0 +1,718 @@
+# UI Analysis in R
+library(dplyr)
+library(stringr)
+library(Rmisc)
+library(tidyr)
+library(ggplot2)
+library(BBmisc)
+
+# import the result of ApoHP (https://github.com/alangenb/ApoHP) on the genome
+#####
+POSData <- read_delim("BH214.txt","\t", 
+escape_double = FALSE, col_types = cols(
+looplen = col_factor(levels = c("3","4", "5", "6", "7", "8", "9", "10", "11")),
+looppos = col_factor(levels = c("0","1", "2", "3", "4", "5", "6", "7","8", "9", "10", "11", "12")),
+minus0 = col_factor(levels = c("1","2", "3", "4")),
+minus1 = col_factor(levels = c("1","2", "3", "4")), 
+minus2 = col_factor(levels = c("1","2", "3", "4")), 
+plus1 = col_factor(levels = c("1","2", "3", "4")), 
+plus2 = col_factor(levels = c("1","2", "3", "4")), 
+plus3 = col_factor(levels = c("1","2", "3", "4")), 
+ref = col_factor(levels = c("1","2", "3", "4"))), trim_ws = TRUE)
+names(POSData)[1] <- "POS"
+#######
+
+## import bam-readcount (XXX_BRC.txt) files
+input_files <- list.files(path = "input directore here", pattern="*_BRC.txt", full.names=T) 
+for(i in input_files){
+    assign(paste(str_replace_all(i, ".*/|_BRC.txt","")),
+    read.table(i,sep = "\t",col.names=c("Chr.","POS","REF","COV","A","C","G","T")))
+}
+### ==> for example, this might import = AID_CRY1 , AID_CRY2 , EV1 and EV2 samples.
+
+## create a data.frame to store this info :
+Samples <- data.frame(
+    "samp" = c("AID_CRY1","AID_CRY2","EV1","EV2"), #unique sample-replicate name
+    "stype" = as.factor(c("AID","AID","EV","EV")) , # biological sample type (AID/A3A/EV...)
+    "active" = c(T,T,F,F) # is it catalytically active?
+)
+
+########################
+## simplified UX function:
+UX <- function(Y) {
+    X <- Y
+    # defining conditions    
+    cond1 <- logical(nrow(X)) ; cond1 <- X$REF == "C"
+    cond2 <- logical(nrow(X)) ; cond2 <- X$REF == "G"
+    # C to T changes only
+    t <- ifelse(cond1, as.integer(X$T), 0) / X$COV
+    # G to A changes only
+    a <- ifelse(cond2, as.integer(X$A), 0) / X$COV
+    # All changes
+    c(a+t) 
+}
+########################
+
+### getting Uracilation fractions at positions:
+for(i in Samples$samp){
+assign(paste0(as.character(i)) ,  mutate(get(as.character(i)) , U=UX(get(as.character(i)))) )
+}
+
+########################
+## Gather all the samples data into object X
+
+for(i in Samples$samp){
+assign(paste(as.character(i)) , filter(get(as.character(i)) , REF %in% c("C","G")))
+}
+
+for(i in Samples$samp){
+assign(paste(as.character(i)) , mutate(get(as.character(i)) , sample = as.factor(i)))
+}
+
+tmp <- NULL ; X <- NULL ;
+for(i in Samples$samp){
+tmp <- select(get(as.character(i)) , POS , U , sample ) 
+X <- rbind(X, tmp)
+}
+########################
+save(X, Samples, POSData , file = "X_Samples_POSData.RData")
+########################
+## NOTE: A3A , A3A-AIDL1 and other samples can be loaded and processed similarly, 
+## their sample information and Uracilation fraction at position needs to be added to "Samples" and "X" objects for analysis
+########################
+
+## Analysis :
+
+### Adding the relevant info to POSData
+with(POSData,c(minus1 %in% c("1" ,"4") & minus0 %in% c("1" ,"3") & plus1 %in% c("2","4") )) -> POSData$is_wrcy
+### ssGroup
+POSData %>% 
+{ifelse(.$ss < 7, "0-7" ,
+ifelse(.$ss <= 9, "8-9",
+ifelse(.$ss <= 11, "10-11", 
+ifelse(.$ss <= 13, "12-13",
+ifelse(.$ss <= 15, "14-15", 
+ifelse(.$ss <= 17, "16-17",
+ifelse(.$ss <= 19, "18-19", "20+" )))))))} %>%
+    as.factor() %>% 
+    factor(levels = c("0-7","8-9","10-11","12-13","14-15","16-17","18-19", "20+")) -> POSData$ssGroup
+### HP / nHP
+ifelse(POSData$ss >=12, "HP", "nHP") %>% factor(levels=c("HP","nHP")) -> POSData$hp
+ifelse(POSData$ss >=15, "HP", "nHP") %>% factor(levels=c("HP","nHP")) -> POSData$hp2
+### LDST/LGST  ## 1664141 and 3906549 are genomic positions of ORI and TER
+POSData %>% {ifelse( .$ref == "2" , 1 , -1 )} -> POSData$strand
+POSData %>% {ifelse((.$POS > 1664141 & .$POS < 3906549 ), "Left", "Right" )} %>% as.factor() -> POSData$Replication
+POSData %>% {ifelse(((.$Replication == "Right" & .$strand == 1) | (.$Replication == "Left" & .$strand == -1)), "LGST" , "LDST")} %>% as.factor() -> POSData$LDLGST
+###
+ANN <- readr::read_delim("BH214.gff" ,col_names=F ) 
+txp <- filter(ANN, X7 == "+") %>% select(X4,X5) %>% {unlist(Map(":" , .$X4, .$X5))}  
+txm <- filter(ANN, X7 == "-") %>% select(X4,X5) %>% {unlist(Map(":" , .$X4, .$X5))}  
+ifelse( POSData$POS %in% txp & !(POSData$POS %in% txm), "+", ifelse(POSData$POS %in% txm & !(POSData$POS %in% txp), "-", ".")) %>% factor(levels=c("+","-",".")) -> POSData$txdir 
+with(POSData, ifelse(((txdir =="+" & ref==2 )|(txdir =="-" & ref==3 )), "nontranscribed", 
+ifelse(((txdir =="+" & ref==3 )|(txdir =="-" & ref==2 )), "transcribed", "."))) %>% 
+factor(levels=c("transcribed","nontranscribed",".")) -> POSData$tx_strand
+#### randomly divide the Positions into 3 sets
+Sample_sets = c(set1 = 1/3, set2 = 1/3, set3 = 1/3)
+POSData$set = sample(cut( seq(nrow(POSData)), 
+  nrow(POSData)*cumsum(c(0,Sample_sets)),
+  labels = names(Sample_sets)
+))
+#testing that the divisions have uniform stem strength
+group_by(POSData , set) %>% dplyr::summarize(mean_ss=mean(ss))
+# # A tibble: 3 × 2
+#   set    mean
+#   <fct> <dbl>
+# 1 set1   7.07
+# 2 set2   7.07
+# 3 set3   7.07
+
+##########
+# Fig. 3A
+##########
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","EV")]) %>%  
+left_join(  POSData  , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","LDLGST")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>%
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U, -set, -LDLGST) %>%
+left_join(.,Samples ) %>% mutate(context="NC") -> plotdata.x3a.nc
+#######
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","EV")]) %>%  
+left_join( filter(POSData, POSData$minus0==4) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","LDLGST")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>%
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U, -set, -LDLGST) %>%
+left_join(.,Samples ) %>% mutate(context="TC") -> plotdata.x3a.tc
+#######
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","EV")]) %>%  
+left_join( filter(POSData, is_wrcy) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","LDLGST")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>%
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U, -set, -LDLGST) %>%
+left_join(.,Samples ) %>% mutate(context="WRCY") -> plotdata.x3a.wrcy
+#######
+rbind(plotdata.x3a.nc,plotdata.x3a.tc,plotdata.x3a.wrcy) %>% 
+mutate(stype=factor(stype, levels=c("A3A","AID","EV"))) %>%
+summarySE(measurevar="U", groupvars=c("stype","context","LDLGST")) %>% 
+  ggplot(aes(x = stype , y = U ,fill = stype,  col = stype , alpha =  LDLGST )) + 
+  geom_hline(yintercept = 1 , lty = "dotted" , lwd = 1.5) +
+  geom_bar( stat = "identity" , position = position_dodge2(width = 1 ,padding = 0.30 )  , lwd = 2 )+  
+  geom_errorbar(inherit.aes = F , mapping = aes(x = stype , ymin=U-sd, ymax=U+sd , group = LDLGST) , col = "black" , width = 0.4, size=1 , position = position_dodge(.9 )) + 
+  theme_bw() + ylab("Normalized Uracilation" ) + 
+  labs(title =  "Replication Bias at different context" , alpha = "Replicative Strand"  )  + 
+  facet_wrap(~context) + 
+  scale_y_continuous(breaks = seq(0.6,1.4,.2)) + 
+  scale_x_discrete(labels = c("A3A" , "AID.cry" , "EV"))+ 
+  scale_color_manual(guide = 'none',
+  breaks =c("A3A" , "AID" , "EV"), 
+  labels = c("A3A" , "AID.cry" , "EV"), 
+  values = c("#E87D72","#53B74C","#61caff")) + 
+  scale_fill_manual(guide = 'none',
+  breaks =c("A3A" , "AID" , "EV"),
+  labels = c("A3A" , "AID.cry" , "EV"), 
+  values = c("#E87D72","#53B74C","#61caff")) + 
+  scale_alpha_discrete(guide =  guide_legend(title.position = "top"), range=c(0.2,1))+
+  xlab("") + 
+  coord_cartesian(ylim = c(.6, 1.5)) + 
+  theme(axis.text = element_text(size = 16 , colour = "Black") , 
+  legend.text = element_text(size = 20), 
+  legend.title = element_text(size =22) , 
+  axis.title.y = element_text(size =24) , 
+  axis.text.y = element_text(size =20) ,
+  title = element_text(size =20) , 
+  strip.text.x = element_text(size =17 , face = "bold") , 
+  strip.background = element_rect(fill="white"), 
+  axis.text.x = element_text(face = "bold", vjust = .6) , 
+  legend.direction = "horizontal",
+  legend.position = c(0.83, 0.85))  -> g.x3a
+
+png("Fig_3A_New_HP_Survey_combined_DataNormalized_colored.png" , width = 12 , height = 8 , units = "in" , res = 300)
+g.x3a
+dev.off()
+
+
+
+##########
+# Fig 3B
+########## 
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A", "AID","EV")]) %>%  
+left_join(  filter(POSData ,minus0==4) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","hp2")) %>% 
+mutate(U=U*1e3) %>%
+mutate( context="TC") -> plotdata.x3b.tc
+#######
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A", "AID","EV")]) %>%  
+left_join(  filter(POSData ,is_wrcy) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","hp2")) %>% 
+mutate(U=U*1e3) %>%
+mutate(context="WRCY") -> plotdata.x3b.wrcy
+####### X3B
+rbind(plotdata.x3b.tc,plotdata.x3b.wrcy) %>% 
+mutate(stype=factor(stype, levels=c("A3A","AID","EV"))) %>%
+mutate(hp2= factor(hp2, levels=c("nHP","HP")))%>%
+summarySE(measurevar="U", groupvars=c("stype","context","hp2")) %>%
+ggplot() + 
+geom_bar(aes(x=stype , y= U , fill = hp2), stat= "identity", position = position_dodge() , size=1.2, col = "black") + 
+geom_errorbar(inherit.aes = F , mapping = aes(x = stype , ymin=U-sd, ymax=U+sd , group = hp2) , col = "black" , width = 0.4, size= 1, position = position_dodge(.9 )) + 
+facet_wrap(~context) +
+ylab("Uracilation Index") + 
+theme_bw()  +xlab("") + 
+labs(title="Uracilation at Hairpins\n(Stem Strength ≥15)",xlab="") +  
+theme( plot.title = element_text(size = 25),
+ axis.text.x = element_text(size = 22,color="black"), 
+ axis.text.y  = element_text(size = 21,color="black"), 
+ axis.title  = element_text(size=23) , 
+ strip.text.x = element_text(size=20),
+ strip.background = element_rect(fill="white"),
+ legend.title = element_text(size = 20), 
+ legend.text = element_text(size=18) , 
+ legend.position =   c(.9, .85)) +
+scale_x_discrete( breaks=c("A3A", "AID" ,"EV"), labels=c("A3A","AID.cry",  "EV"))+
+coord_cartesian( ylim = c(0,5.5)) + 
+scale_y_continuous(expand=c(0,0),breaks = seq(0,6,1)) +
+scale_fill_manual(name = "Hairpin",labels = c("YES","NO"), breaks=c("HP","nHP"), values  = c("#494a4a" , "#dbdbdb")) -> g.x3b
+png("Fig_3B_TpC_WRCY_HPss15.png" , width = 8 , height = 6 , units = "in" , res = 300)
+g.x3b
+dev.off()
+
+##########
+# Fig. 3C
+##########
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","EV")]) %>% 
+left_join(  POSData  , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","ssGroup")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>% 
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U,  -set, -ssGroup) %>% 
+left_join(.,Samples) -> plotdata.x3c
+
+summarySE(plotdata.x3c, measurevar="U", groupvars=c("stype","ssGroup")) %>%
+mutate(stype= factor(stype, levels=c("A3A","AID","EV"))) %>%
+ggplot() +
+geom_hline(yintercept=1, lty = "dotted", size= 1.3)  +
+geom_bar(aes(x=stype, y=U, fill=ssGroup),alpha=1,lwd = 0.25 , col="black", stat= "identity", position=position_dodge())+
+theme_bw()+
+scale_fill_brewer(palette = "YlOrRd") + 
+labs(title="", x="",y="Normalized Uracilation Index")+
+scale_y_continuous(expand = c(0,0), breaks=seq(0.5,2,0.5))+
+scale_x_discrete( breaks=c("A3A", "AID","EV"), labels=c("A3A","AID","EV"))+
+geom_errorbar(inherit.aes = F , mapping = aes(x = stype ,group = ssGroup,ymin=U-sd, ymax=U+sd), width=.25,size=.5, position=position_dodge(.9)) +
+theme( plot.title = element_text(size = 25), 
+axis.text.x = element_text(face = "bold",color="black",size = 24), 
+axis.text.y  = element_text(size = 24), 
+axis.title  = element_text(size=28) , 
+legend.title = element_text(size = 25), 
+legend.text = element_text(size=24) , 
+legend.position =   "right") +
+coord_cartesian(ylim=c(0,2.8)) -> g.x3c
+
+png("Fig_3C_A3A_AID_EV_ssGroup.png" , width = 10 , height = 9 , units = "in" , res = 300)
+g.x3c
+dev.off()
+
+
+### t-tests 
+plotdata.x3c %>% 
+filter(stype=="A3A", ssGroup %in% c("0-7","20+")) %>%
+{t.test(U~ssGroup , . , paired = F , alternative = "two.sided")}
+#p-value = 8.266e-08
+plotdata.x3c %>% 
+filter(stype=="AID", ssGroup %in% c("0-7","20+")) %>%
+{t.test(U~ssGroup , . , paired = F , alternative = "two.sided")}
+#p-value = 0.5469
+plotdata.x3c %>% 
+filter(stype=="EV", ssGroup %in% c("0-7","20+")) %>%
+{t.test(U~ssGroup , . , paired = F , alternative = "two.sided")}
+#p-value = 0.2185
+
+##########
+# Fig. 4A
+##########
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","A3A_AIDL1")]) %>%  
+left_join( filter(POSData, POSData$minus0==4) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","LDLGST")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>%
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U, -set, -LDLGST) %>%
+left_join(.,Samples ) -> plotdata.x4a
+
+summarySE(plotdata.x4a, measurevar="U", groupvars=c("stype","LDLGST")) %>%
+mutate(stype= factor(stype, levels=c("A3A","A3A_AIDL1","AID"))) %>%
+  ggplot(aes(x = stype , y = U ,fill = stype,  col = stype , alpha =  LDLGST )) + 
+  geom_hline(yintercept = 1 , lty = "dotted" , lwd = 1.5) +
+  geom_bar( stat = "identity" , position = position_dodge2(width = 1 ,padding = 0.30 )  , lwd =2.5 )+
+  geom_errorbar(inherit.aes = F , mapping = aes(x = stype , ymin=U-sd, ymax=U+sd , group = LDLGST) , col = "black" , width = 0.4, size=1 , position = position_dodge(.9 )) + # this is messy but it works!
+  theme_bw() + ylab("Normalized Uracilation Index" ) + 
+  labs(x="", title =  "Replication Bias at TC context" , alpha = "Replicative Strand"  )  + 
+  scale_y_continuous(breaks = seq(0,1.6,.2)) + 
+  coord_cartesian(ylim = c(.3, 1.7)) + 
+  scale_x_discrete(labels = c("A3A" , "A3A-AIDL1" , "AID.cry") )+ 
+  scale_alpha_discrete(name="Replicative Strand",guide = guide_legend(title.position = "top"), range=c(0.2,1))+
+  scale_fill_manual(guide='none',breaks =c("A3A","A3A_AIDL1","AID"), 
+  labels = c("A3A" , "A3A-AIDL1", "AID.cry") , 
+  values = c("#E87D72","#AA4980","#53B74C"))+
+  scale_color_manual(guide = 'none',breaks =c("A3A","A3A_AIDL1","AID"), 
+  labels = c("A3A" , "A3A-AIDL1", "AID.cry") , 
+  values = c("#E87D72","#AA4980","#53B74C"))+
+  theme(axis.text = element_text(size = 23 , colour = "Black") , 
+  axis.title.y = element_text(size =24) , 
+  axis.text.y = element_text(size = 22) , 
+  title = element_text(size =24) , 
+  axis.text.x = element_text(face = "bold", vjust = .6) , 
+  legend.text =  element_text(size = 22) , 
+  legend.direction = "horizontal",
+  legend.position = c(0.25,0.9)) -> g.x4a
+png("Fig_4A_A3A_A3AAIDL1_LDLGST3.png" , width = 8 , height = 8 , units = "in" , res = 300)
+g.x4a
+dev.off()
+
+
+##########
+# Fig. 4B
+##########
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","A3A_AIDL1")]) %>% 
+left_join(  POSData  , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","ssGroup")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>% 
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U,  -set, -ssGroup) %>% 
+left_join(.,Samples) -> plotdata.x4b
+
+summarySE(plotdata.x4b, measurevar="U", groupvars=c("stype","ssGroup")) %>%
+mutate(stype= factor(stype, levels=c("A3A","A3A_AIDL1"))) %>%
+ggplot() +
+geom_hline(yintercept=1, lty = "dotted", size= 1.3)  +
+geom_bar(aes(x=stype, y=U, fill=ssGroup),alpha=1,lwd = 0.25 , col="black", stat= "identity", position=position_dodge())+
+theme_bw()+
+scale_fill_brewer(palette = "YlOrRd") + 
+labs(title="", x="",y="Normalized Uracilation Index")+
+scale_y_continuous(expand = c(0,0), breaks=seq(0.5,2,0.5))+
+scale_x_discrete( breaks=c("A3A", "A3A_AIDL1"), labels=c("A3A","A3A-AIDL1"))+
+geom_errorbar(inherit.aes = F , mapping = aes(x = stype ,group = ssGroup,ymin=U-sd, ymax=U+sd), width=.25,size=.5, position=position_dodge(.9)) +
+theme( plot.title = element_text(size = 25), 
+axis.text.x = element_text(face = "bold",color="black",size = 22), 
+axis.text.y  = element_text(size = 23), 
+axis.title  = element_text(size=25) , 
+legend.title = element_text(size = 22), 
+legend.text = element_text(size=20) , 
+legend.position =   c(.12, .78)) +
+coord_cartesian(ylim=c(0,2.5)) -> g.x4b
+
+png("Fig_4B_UI_A3A_A3AAIDL1_ssGroup_normalized.png" , width = 8 , height = 8 , units = "in" , res = 300)
+g.x4b
+dev.off()
+
+
+##########
+# Fig. 4C
+##########
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","A3A_AIDL1")]) %>% 
+left_join(  filter(POSData, ss>=12, looplen <= 8, looppos>= 1, looppos<=looplen), .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","looplen","looppos")) %>% 
+mutate(U=U*1e3) -> plotdata.x4c
+
+samps <- c("A3A"="A3A","A3A_AIDL1"="A3A-AIDL1")
+
+summarySE(plotdata.x4c , measurevar="U", groupvars=c("stype","looplen","looppos")) %>%
+mutate(rel_looppos = c((looppos - 1) / (looplen -1) )) %>%
+ggplot() +
+geom_bar(aes(x=looplen, y=U, group = as.factor(looppos), fill= rel_looppos),alpha=1,lwd = 0.2 , col="black", stat= "identity", position=position_dodge())+
+theme_bw()+
+facet_wrap(~stype,labeller = labeller(stype = samps), ncol=1,strip.position="right")+
+scale_fill_gradient(name = "Position of \nC within loop", 
+breaks=c(0,1), labels=c("5'","3'"),
+low= "#39c3b6", high = "#fd9e32")  +
+labs(title="", x="Hairpin Loop Length",y="Uracilation Index")+
+scale_y_continuous(expand = c(0,0), breaks=seq(2,12,2))+
+scale_x_continuous( breaks=seq(0,8))+
+geom_errorbar(inherit.aes = F , mapping = aes(x = looplen ,group = rel_looppos,ymin=U-sd, ymax=U+sd), width=.2, position=position_dodge(.9)) +
+theme( plot.title = element_text(size = 25), 
+axis.text.x = element_text(color="black",size = 22), 
+axis.text.y  = element_text(size = 22), 
+axis.title  = element_text(size=24) , 
+strip.background = element_rect(fill="white"), 
+strip.text = element_text(size=24),
+legend.title = element_text(size = 20,hjust=0.5), 
+legend.text = element_text(size = 22) , 
+legend.direction = "horizontal",
+legend.position =   c(0.75,0.85)) +
+coord_cartesian(ylim=c(0,20))+
+guides(fill = guide_colourbar(barwidth = 10, barheight = 1, label.position = "bottom", title.position = "top")) -> g.x4c
+
+png("Fig_4C_UI_A3A_A3AAIDL1_looplen_looppos.png" , width = 7 , height = 8 , units = "in" , res = 300)
+g.x4c
+dev.off()
+
+##########
+## import Tumor mutation data: rbias (replicative bias) and tbias (transcriptional bias)
+## These values were calculated separately in MATLAB 
+read.table( "rbias.txt" ,header=T) -> rbias
+read.table( "tbias.txt" ,header=T) -> tbias
+## mutation rates in ssbins 
+read.table( "ssbins2n_TC.txt" ,header=T) -> ssbins2n_TC
+read.table( "ssbins2n_WRCY.txt" ,header=T) -> ssbins2n_WRCY
+
+
+##########
+# Fig. 5A
+##########
+rbias %>% 
+gather("data", "value") %>% 
+separate(data, sep="_", into=c("cohort","context","strand","measure")) %>%
+spread(measure,value) %>% 
+mutate(strand = factor(strand,levels=c("LGST", "LDST")), context = factor(context, levels=c("NC", "TC", "WRCY"))) -> rbias 
+rbias$cohort[rbias$cohort == "A3A"] <- "APOBEC"
+###
+rbias %>% filter(context != "NC") %>%
+mutate(cohort=factor(cohort,levels=c("APOBEC","AID")))%>%
+mutate(strand=factor(strand,levels=c("LDST","LGST"))) %>%
+ggplot(aes(x=cohort,y=rate, fill = cohort,  col = cohort , alpha =  strand))+
+geom_bar( stat = "identity" , position = position_dodge2(width = 1 ,padding = 0.30 ),lwd =1.5)+
+geom_errorbar(inherit.aes = F ,mapping = aes(x=cohort,ymin=rate-2*sd, ymax=rate+2*sd , group=strand),  col = "black",width = 0.4, size=0.5 , position=position_dodge(.9))+
+labs(x= "Tumor Cohort", y="Normalized Mutation Rate" , title="Replicative Strand Bias",fill="") +
+theme_bw() + 
+scale_y_continuous(expand=c(0,0),breaks = seq(1,4,1))+
+coord_cartesian(ylim = c(0, 4.5)) + 
+scale_alpha_discrete(name="Replicative Strand",
+guide = guide_legend(title.position = "top"), range=c(0.2,1))+
+scale_fill_manual(guide='none',breaks =c("APOBEC","AID"), 
+labels = c("APOBEC" , "AID") , 
+values = c("#E87D72","#53B74C"))+
+scale_color_manual(guide = 'none',breaks =c("APOBEC","AID"), 
+labels = c("APOBEC" , "AID") , 
+values = c("#E87D72","#53B74C"))+
+theme(axis.text = element_text(size = 23 , colour = "Black") , 
+axis.title.y = element_text(size =24) , 
+axis.text.y = element_text(size = 22) , 
+title = element_text(size =24) , 
+axis.text.x = element_text(face = "bold", vjust = .6) , 
+strip.text = element_text(size =24) , 
+strip.background = element_rect(fill="white"),
+legend.text =  element_text(size = 22) , 
+legend.direction = "horizontal",
+legend.position = c(0.75,0.85)) +
+facet_wrap(~context) -> g.x5a
+png(  "Fig_5A_rep_strand_bias_context_ci.png" , height =6 , width = 8, units = "in" , res= 300)
+g.x5a
+dev.off()
+
+##########
+# Fig. 5B
+##########
+
+tbias %>% 
+gather("data", "value") %>% 
+separate(data, sep="_", into=c("cohort","context","strand","measure")) %>%
+spread(measure,value) %>% 
+mutate(strand = factor(strand,levels=c("txplus", "txminus")), context = factor(context, levels=c("NC", "TC", "WRCY"))) -> tbias 
+tbias$cohort[tbias$cohort == "A3A"] <- "APOBEC"
+###
+tbias %>% filter(context != "NC") %>%
+mutate(cohort=factor(cohort,levels=c("APOBEC","AID")))%>%
+mutate(strand=factor(strand,levels=c("txminus","txplus")))%>%
+ggplot(aes(x=cohort,y=rate, fill = cohort,  col = cohort , alpha =  strand))+
+geom_bar( stat = "identity" , position = position_dodge2(width = 1 ,padding = 0.30 ),lwd =1.5)+
+geom_errorbar(inherit.aes = F ,mapping = aes(x=cohort,ymin=rate-2*sd, ymax=rate+2*sd , group=strand),  col = "black",width = 0.4, size=0.5 , position=position_dodge(.9))+
+labs(x= "Tumor Cohort", y="Normalized Mutation Rate" , title="Transcriptional Strand Bias",fill="") +
+theme_bw() + 
+scale_y_continuous(expand=c(0,0),breaks = seq(1,4,1))+
+coord_cartesian(ylim = c(0, 4.5)) + 
+scale_alpha_discrete(name="Transcription Strand",
+breaks=c("txminus","txplus"),
+ labels=c("Tx-","Tx+"),
+guide = guide_legend(title.position = "top"), range=c(0.2,1))+
+scale_fill_manual(guide='none',breaks =c("APOBEC","AID"), 
+labels = c("APOBEC" , "AID") , 
+values = c("#E87D72","#53B74C"))+
+scale_color_manual(guide = 'none',breaks =c("APOBEC","AID"), 
+labels = c("APOBEC" , "AID") , 
+values = c("#E87D72","#53B74C"))+
+theme(axis.text = element_text(size = 23 , colour = "Black") , 
+axis.title.y = element_text(size =24) , 
+axis.text.y = element_text(size = 22) , 
+title = element_text(size =24) , 
+axis.text.x = element_text(face = "bold", vjust = .6) , 
+strip.text = element_text(size =24) , 
+strip.background = element_rect(fill="white"),
+legend.text =  element_text(size = 22) , 
+legend.direction = "horizontal",
+legend.position = c(0.75,0.85)) +
+facet_wrap(~context) -> g.x5b
+
+png("X4B_transcription_strand_bias_context_ci.png" , height =6 , width = 8, units = "in" , res= 300)
+g.x5b
+dev.off()
+
+##########
+# Fig. 5C
+##########
+
+rbind( mutate(ssbins2n_TC, context= "TC"),
+mutate(ssbins2n_WRCY, context= "WRCY")) %>% 
+gather("data", "value", - c(1:4),  -context) %>%  
+separate(data, sep="_", into=c("cohort","strand","measure"))  %>% 
+spread(measure, value , -1:7) %>%
+mutate(ssGroup = factor(range, levels= c("0-7","8-9","10-11","12-13","14-15","16-19","20+"))) -> plotdata.x5c
+plotdata.x5c$cohort[plotdata.x5c$cohort == "A3A"] <- "APOBEC"
+plotdata.x5c$strand[plotdata.x5c$strand == "BOTH"] <- "Both Strands"
+mutate(plotdata.x5c, cohort=factor(cohort,levels=c("APOBEC","AID"))) -> plotdata.x5c
+###
+ggplot(plotdata.x5c, aes(x=cohort, y=rate, fill= ssGroup ))+
+geom_bar(stat = "identity" , col="black", lwd = 0.2 , position = position_dodge()) +
+geom_errorbar(aes(ymin=rate-2*sd, ymax=rate+2*sd), width=.2, position=position_dodge(.9))+
+facet_grid(strand~context)+ theme_bw()+
+scale_fill_brewer(name="Hairpin \nStem \nStrength", palette = "YlOrRd") + 
+scale_y_continuous(expand = c(0,0), breaks=seq(1,7,2))+
+labs(title="", x="Tumor Cohort",y="Normalized Mutation Rate")+
+theme( plot.title = element_text(size = 25), 
+axis.text.x = element_text(face = "bold",color="black",size = 22), 
+axis.text.y  = element_text(size = 23), 
+axis.title  = element_text(size=25) , 
+strip.background = element_rect(fill="white"),
+strip.text=element_text(size = 22),
+legend.title = element_text(size = 22), 
+legend.text = element_text(size=20) , 
+legend.position =   "right") +
+coord_cartesian(ylim=c(0,8.5)) -> g.x5c
+
+png( "Fig_5C_A3A_AID_ssbins2_contexts_CI.png" , width=8, height = 9 , unit= "in", res=300)
+print(g.x5c)
+dev.off()
+
+
+##########
+# Fig. S4A
+##########
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A","AID","A3A_AIDL1","A3A_E72A","EV")]) %>%  
+left_join( filter(POSData, tx_strand != ".") , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+summarySE(measurevar="U", groupvars=c("stype","sample","set","tx_strand")) %>% 
+mutate(U=U*1e3) %>% 
+select(-sd,-se,-ci,-N,-stype) %>% spread(key=sample,value=U) %>%
+mutate_if(is.numeric , ~c(./mean(.))) %>% 
+gather(key = samp, value = U, -set, -tx_strand) %>%
+left_join(.,Samples ) -> plotdata.xs4a
+
+summarySE(plotdata.xs4a, measurevar="U", groupvars=c("stype","tx_strand")) %>%
+mutate(stype= factor(stype, levels=c("A3A","A3A_AIDL1","AID","A3A_E72A","EV"))) %>%
+filter(stype %in% c("A3A","AID","EV"))%>%
+  ggplot(aes(x = stype , y = U ,fill = stype,  col = stype , alpha =  tx_strand )) + 
+  geom_hline(yintercept = 1 , lty = "dotted" , lwd = 1.5) +
+  geom_bar( stat = "identity" , position = position_dodge2(width = 1 ,padding = 0.30 )  , lwd =2.5 )+
+  geom_errorbar(inherit.aes = F , mapping = aes(x = stype , ymin=U-sd, ymax=U+sd , group = tx_strand) , col = "black" , width = 0.4, size=1 , position = position_dodge(.9 )) + # this is messy but it works!
+  theme_bw() + ylab("Normalized Uracilation Index" ) + 
+  labs(x="", title =  "Transcriptional Bias" , alpha = "Transcriptional Strand"  )  + 
+  scale_y_continuous(breaks = seq(0.80,1.2,.05)) + 
+  coord_cartesian(ylim = c(.82, 1.18)) + 
+  scale_x_discrete(labels = c("A3A" ,  "AID.cry",  "EV") )+ 
+  scale_alpha_discrete(name="Transcriptional Strand",
+  breaks=c("transcribed","nontranscribed"),
+  labels=c("Transcribed","Non-transcribed"),
+  guide = guide_legend(title.position = "top"), range=c(0.2,1))+
+  scale_fill_manual(guide='none',breaks =c("A3A" ,  "AID",  "EV"), 
+  labels = c("A3A" ,  "AID.cry",  "EV") , 
+  values = c("#E87D72","#53B74C","#61caff"))+
+  scale_color_manual(guide = 'none',breaks =c("A3A" ,  "AID",  "EV"), 
+  labels = c("A3A" ,  "AID.cry",  "EV") , 
+  values = c("#E87D72","#53B74C","#61caff"))+
+  theme(axis.text = element_text(size = 23 , colour = "Black") , 
+  axis.title.y = element_text(size =24) , 
+  axis.text.y = element_text(size = 22) , 
+  title = element_text(size =24) , 
+  axis.text.x = element_text(face = "bold", vjust = .6) , 
+  legend.text =  element_text(size = 22,hjust=0.5) , 
+  legend.direction = "horizontal",
+  legend.position = c(0.6,0.9)) -> g.xs4a
+png("X1X_A3A_AID_EV_transcriptional_bias.png" , width = 8 , height = 8 , units = "in" , res = 300)
+g.xs4a
+dev.off()
+
+
+
+##########
+# Fig. S4C
+##########
+UXBIASFinder_ORI_Right <- function(X , ws = 5e5 , js = 5e4 , samplename = "sampl") {
+  #window size : ws   jumping size : js
+  library(dplyr)
+  library(data.table)
+  X %>% 
+  filter(sample != "NA") %>%
+  group_by(sample) %>% 
+  complete(POS = rep(seq(1:max(X$POS)),2)  ) -> X
+
+  X %>% filter(POS > 3.3e6 ) %>% 
+  mutate( POS = POS - max(X$POS)) %>% 
+  rbind(X ,.) %>% arrange(sample , POS) -> X
+  
+  X %>% {setDT(.)[SJ(start = seq(-1e6, max(X$POS), js))[, end := start + ws - js],  on = .(POS >= start, POS <= end), .(UX = mean(U, na.rm = T)), by = .EACHI]$UX} -> u
+  
+  X  %>% dplyr::filter(strand == "1" ) %>% {setDT(.)[SJ(start = seq(-1e6, max(X$POS), js))[, end := start + ws - js],  on = .(POS >= start, POS <= end), .(UX = mean(U, na.rm = T)), by = .EACHI]$UX} -> c
+  X  %>% dplyr::filter(strand == "-1" ) %>% {setDT(.)[SJ(start = seq(-1e6, max(X$POS), js))[, end := start + ws - js],  on = .(POS >= start, POS <= end), .(UX = mean(U, na.rm = T)), by = .EACHI]$UX} -> g
+  X %>% {setDT(.)[SJ(start = seq(-1e6, max(X$POS), js))[, end := start + ws - js],  on = .(POS >= start, POS <= end), .(UX = mean(U, na.rm = T)), by = .EACHI][,1:2]} %>% {rowMeans(.)} -> posi
+  
+  data.frame("pos" = posi , ux = u / mean(u)) %>% as.tbl() %>% 
+  filter(pos > -0.8e6 & pos < 4e6 ) %>% mutate(pos = pos +0.72e6 , data_type =as.factor("UX")) -> Oux # this returns the pos with ORI set at 0 and Ter at 4.6
+  names(Oux)[1:2] <-  c("POS" , samplename)
+  
+  data.frame("pos" = posi , bs = (c/g)) %>% as.tbl() %>% 
+  filter(pos > -0.8e6 & pos < 4e6 ) %>% mutate(pos = pos +0.72e6 ,  data_type =as.factor("Bias")) -> Obs # this returns the pos with ORI set at 0
+  names(Obs)[1:2] <-  c("POS" , samplename)
+  rbind(Oux , Obs)
+}
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("A3A")]) %>%  
+left_join( select(POSData, POS , strand) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+UXBIASFinder_ORI_Right( samplename = "A3A") -> A3A_UX500_50_k
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("AID")]) %>%  
+left_join( select(POSData, POS , strand) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+UXBIASFinder_ORI_Right( samplename = "AID") -> AID_UX500_50_k
+
+filter(X , sample %in% Samples$samp[Samples$stype %in% c("EV")]) %>%  
+left_join( select(POSData, POS , strand) , .) %>% tidyr::drop_na() %>%  
+left_join(.,Samples, by=c("sample"="samp")) %>%  
+UXBIASFinder_ORI_Right( samplename = "EV") -> EV_UX500_50_k
+
+full_join(A3A_UX500_50_k , AID_UX500_50_k) %>% 
+full_join(., EV_UX500_50_k) %>%
+gather(value = "UX", key = "Sample" , -POS , - data_type ) -> plotdata.xs4c
+
+plotdata.xs4c  %>% filter( data_type == "Bias" ) %>% ggplot(aes(x=POS/1e6 , y = UX , col = Sample)) +geom_point(size = 1.2)  + xlim(c(0 , 4.62)) +
+  geom_line( lty = "dashed" , lwd = 0.5 , alpha = .6) + theme_bw() +
+  geom_vline( xintercept = c(0 ,2.38, 4.62) , alpha  = 2/3 , lwd =1.2 , lty = "dotted") +
+  ylab("Strand Bias (C>T / G>A)") + xlab("Distance from ORI (Mbp)") + 
+  theme(axis.title.x = element_text(hjust = 0,size=22) ,
+    axis.title.y = element_text(size=22),
+    legend.position = "top",
+    legend.title = element_text(size=22),
+    legend.text = element_text(size=20)) + 
+  geom_hline(yintercept = 1 , alpha  = 2/3 , lwd =1.2 , lty = "dotted") + 
+  geom_text(aes(x = 4.5 , y = .8 ,label = "ORI") ,text=element_text(size=16) ) +
+  geom_text(aes(x = 2.5 , y = .8 ,label = "TER") ,text=element_text(size=16) ) +
+  geom_text(aes(x =.15 , y = .8 ,label = "ORI") ,text=element_text(size=16) ) -> g.xs4b
+
+png("XS4C_UX_Bias_3Samples_fixed_POS_Ori_left.png" , width = 8 , height = 6 , units = "in" , res = 330)
+g.xs4c
+dev.off()
+
+
+##########
+# Fig. S6
+##########
+## mutation rates at different expression quantiles were calculated in MATLAB
+read.table( "transcription_Quantiles_A3_AID_muts.txt" ,header=T) -> txq
+txq %>% 
+gather("data", "value" , -c(1:4)) %>% 
+separate(data, sep="_", into=c("cohort","context","measure") ) %>%
+spread(measure,value) %>% 
+mutate(context = factor(context, levels=c("NC", "TC", "WRCY"))) -> txq 
+txq$cohort[txq$cohort == "A3A"] <- "APOBEC"
+
+COL <- colorRampPalette(c("#2e2d2d","#b50c00"))
+
+filter(txq,context %in% c("TC","WRCY")) %>% 
+ggplot(aes(x=cohort,y=rate,fill=as.factor(bin)))+
+geom_bar( stat = "summary" , fun.y = "mean" , position = position_dodge2(preserve = "total" , width = 20))+
+labs(x= "", y="Mutation rate" , title="Mutation rate vs Expression level (low --> high) ",fill="") +
+scale_fill_manual(name="transcription level", values=COL(10))+
+scale_y_continuous(expand = c(0,0))+ 
+coord_cartesian(ylim=c(0,1))  + 
+theme_classic() + 
+theme( legend.position="none", 
+axis.text = element_text(size = 23 , colour = "Black") , 
+axis.title.y = element_text(size =24) , 
+axis.text.y = element_text(size = 22) , 
+strip.text = element_text(size = 22) , 
+title = element_text(size =22) , 
+axis.text.x = element_text(face = "bold", vjust = .6)) +
+geom_errorbar(aes(ymin=rate-sd, ymax=rate+sd), width=.2, position=position_dodge(.9))+
+facet_wrap(~context) -> g.xs6
+
+png( "XS6_transcription_level_mutations_sd.png" , height =7 , width = 10, units = "in" , res= 300)
+print(g.xs6)
+dev.off()
+
