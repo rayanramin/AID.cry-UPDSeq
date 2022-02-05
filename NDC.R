@@ -9,6 +9,8 @@ NDC <- function(x, y, w=1e5 , b =1e4 , mavn = 120 , NDC_Version = 2 , circ = F){
 #Functions (default values are set based on optimized signal to noise ratio)
 #NDC1 : old version of NDC good for genomes with more uniform coverage
 mav <- function(x,n=100){stats::filter(x,rep(1/n,n),sides=2, circular= circ)}
+`%>%` <- magrittr::`%>%`
+
 NDC1 <- function(x, y){
     mx <- mean(x)
     my <- mean(y)
