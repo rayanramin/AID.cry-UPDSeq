@@ -1,4 +1,11 @@
 NDC <- function(x, y, w=1e5 , b =1e4 , mavn = 120 , NDC_Version = 2 , circ = F){
+# x: coverage vector from treatment sample
+# y: coverage vector from the control sample
+# w: window size for mesoscale normaliztion
+# b: size of the shift in the mesoscale window
+# mavn: size of the moving average window for local normalization
+# circ: logical, is the genome circular?
+    
 #Functions (default values are set based on optimized signal to noise ratio)
 #NDC1 : old version of NDC good for genomes with more uniform coverage
 mav <- function(x,n=100){stats::filter(x,rep(1/n,n),sides=2, circular= circ)}
